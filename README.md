@@ -91,9 +91,32 @@ This is a PoC, not production code:
 | `--pca-rank` | 4096 | PCA dimensionality |
 | `--num-turns` | 4 | RAG questions (rag only) |
 
+## Related projects
+
+Projects on GitHub that use **video/image encoder techniques** (transform coding, quantization, entropy coding) to compress KV caches:
+
+| Project | Technique | Description |
+|---|---|---|
+| [LMCache — CacheGen](https://github.com/LMCache/LMCache) | Quantization + arithmetic coding (video-codec-style entropy coding) | Encodes KV cache into compact bitstreams using distributional properties; integrated with vLLM. Paper: [CacheGen (SIGCOMM 2024)](https://arxiv.org/abs/2310.07240) |
+| **This repo (kvtc-poc)** | PCA + variable-bit quantization + DEFLATE (image/video transform coding pipeline) | PoC of NVIDIA's kvtc paper — same pipeline as JPEG/H.264: transform → quantize → entropy code |
+
+Projects that compress KV caches using **other approaches** (pruning, eviction, low-rank, quantization without transform coding):
+
+| Project | Approach | Description |
+|---|---|---|
+| [NVIDIA kvpress](https://github.com/NVIDIA/kvpress) | Pruning / eviction | Library of KV cache pruning methods (SnapKV, H2O, etc.) for 🤗 Transformers |
+| [KVQuant](https://github.com/SqueezeAILab/KVQuant) | Per-channel quantization | Nuq quantization for 10M+ context lengths (NeurIPS 2024) |
+| [GEAR](https://github.com/opengear-project/GEAR) | Low-rank + quantization + sparse residuals | Near-lossless compression combining three complementary strategies |
+| [KVCache-Factory](https://github.com/Zefan-Cai/KVCache-Factory) | Unified framework | Implements multiple pruning/eviction methods in a single codebase |
+| [xKV](https://github.com/abdelfattah-lab/xKV) | Cross-layer SVD | Low-rank decomposition shared across layers |
+| [Awesome-KV-Cache-Compression](https://github.com/October2001/Awesome-KV-Cache-Compression) | Survey | Curated paper list covering all KV cache compression methods |
+
+> **Summary:** As of writing, projects that literally use a hardware video encoder (H.264/H.265 NVENC) to compress KV caches do not appear to exist on GitHub. However, kvtc and CacheGen both borrow the **core ideas** from video codecs — transform, quantize, entropy code — and apply them to KV cache tensors in software.
+
 ## References
 
 - [KV Cache Transform Coding for Compact Storage in LLM Inference](https://arxiv.org/abs/2511.01815) — Staniszewski & Łańcucki, NVIDIA (ICLR 2026)
+- [CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving](https://arxiv.org/abs/2310.07240) — Liu et al. (SIGCOMM 2024)
 - [NVIDIA kvpress](https://github.com/NVIDIA/kvpress) — KV cache compression library
 - [LMCache](https://github.com/LMCache/LMCache) — KV cache layer for vLLM
 - [nvCOMP](https://developer.nvidia.com/nvcomp) — GPU-accelerated compression
