@@ -113,6 +113,113 @@ def pca(data, rank):
 - `mu` (均值向量): 用于中心化
 - `S` (奇异值): 表示每个主成分的重要性，用于后续的比特分配
 
+#### 2.5.1 `torch.pca_lowrank` 函数详解
+
+`torch.pca_lowrank` 是 PyTorch 提供的**低秩近似 PCA** 实现，基于随机化 SVD（Randomized SVD）算法。它不计算完整的奇异值分解，而是高效地近似出前 `q` 个最大的奇异值和对应的奇异向量。
+
+**函数签名：**
+
+```python
+torch.pca_lowrank(A, q=None, center=True, niter=2)
+```
+
+**参数说明：**
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `A` | Tensor | 输入矩阵，形状 `[n, p]`。在 kvtc 中即中心化后的 KV 缓存矩阵 `[n_pos, 8192]` |
+| `q` | int | 要求的近似秩（保留的主成分数量）。默认为 `min(6, n, p)`。kvtc 中设为 `min(rank, n, p)`，rank 默认 4096 |
+| `center` | bool | 是否自动中心化。kvtc 中手动中心化后传入，此处未显式设置（默认 True，但已中心化的数据再中心化不影响结果） |
+| `niter` | int | 幂迭代（power iteration）次数，用于提高近似精度。kvtc 中设为 5（默认为 2） |
+
+**返回值：**
+
+```python
+U, S, V = torch.pca_lowrank(centered, q=rank, niter=5)
+# U: [n, q]    — 左奇异向量（每行是一个样本在主成分空间的坐标）
+# S: [q]       — 奇异值（降序排列，反映每个主成分的重要性）
+# V: [p, q]    — 右奇异向量（每列是一个主成分方向）
+```
+
+关系满足：`A ≈ U · diag(S) · V^T`
+
+**内部算法 — 随机化 SVD：**
+
+`pca_lowrank` 底层调用 `torch.svd_lowrank`，其核心是 Halko-Martinsson-Tropp (2011) 随机化算法：
+
+```
+算法流程（简化版）：
+
+输入: A [n×p], 目标秩 q, 幂迭代次数 niter
+
+1. 随机投影（Range Finding）:
+   Ω = randn(p, q)           # 生成随机高斯矩阵
+   Y = A @ Ω                  # 将 A 投影到 q 维随机子空间 [n×q]
+
+2. 幂迭代（Power Iteration, 重复 niter 次）:
+   for i in 1..niter:
+       Y = A @ (A^T @ Y)      # 等价于 (AA^T)^niter @ A @ Ω
+                               # 增强主奇异向量，抑制噪声方向
+
+3. 正交化:
+   Q, _ = QR(Y)               # Q [n×q] 是 A 的列空间的正交基
+
+4. 小矩阵 SVD:
+   B = Q^T @ A                # 投影到低维 [q×p]
+   Û, S, V = SVD(B)           # 对小矩阵做精确 SVD
+
+5. 恢复:
+   U = Q @ Û                  # 左奇异向量 [n×q]
+
+输出: U [n×q], S [q], V [p×q]
+```
+
+**为什么用随机化 SVD 而不是精确 SVD？**
+
+| 对比维度 | 精确 SVD (`torch.linalg.svd`) | 随机化 SVD (`pca_lowrank`) |
+|---|---|---|
+| 时间复杂度 | O(n·p·min(n,p)) | O(n·p·q + q²·(n+p)) |
+| kvtc 场景 (n=1000, p=8192, q=4096) | O(8.2×10⁹) | O(3.4×10¹⁰) — 但常数更小且 GPU 友好 |
+| 内存 | 需要完整 U [n×p] | 只需 U [n×q] |
+| 精度 | 精确 | 近似（niter 越大越精确） |
+| GPU 加速 | 受限（内部 LAPACK） | 全程矩阵乘法，GPU 高度并行 |
+
+在 kvtc 的典型场景中 `p=8192, q≤4096`，随机化 SVD 的优势在于：
+1. **只计算需要的前 q 个主成分**，不浪费计算在尾部奇异值上
+2. **全程使用矩阵乘法**（GEMM），GPU 上高度优化
+3. **内存效率**：不需要存储完整的 `[n×8192]` U 矩阵
+
+**`niter=5` 的作用：**
+
+幂迭代次数控制近似质量。每次迭代将矩阵乘以 `(AA^T)`，效果是将奇异值谱中的间隙放大 — 第 i 个奇异值被放大为 `σᵢ^(2·niter+1)`，使前 q 个奇异向量更容易被捕获。
+
+```
+niter=0: 粗略近似，可能遗漏中等大小的奇异值
+niter=2: 默认值，大多数场景足够
+niter=5: kvtc 的选择，确保 PCA 基的高精度（校准是离线过程，多几次迭代的开销可接受）
+```
+
+**在 kvtc 中的具体使用：**
+
+```python
+# kvtc_poc.py 第 151-157 行
+def pca(self, data, rank):
+    mu = data.mean(dim=0)                    # [8192] 均值向量
+    centered = data - mu.unsqueeze(0)        # [n_pos, 8192] 中心化
+    n, p = centered.shape                    # n=n_pos, p=8192
+    r = min(rank, n, p)                      # 实际秩 = min(4096, n_pos, 8192)
+    U, S, V = torch.pca_lowrank(centered, q=r, niter=5)
+    return V, mu, S
+    # V: [8192, r] — 投影矩阵，每列是一个主成分方向
+    # mu: [8192]   — 均值，解压时需要加回
+    # S: [r]       — 奇异值，传给 DP 比特分配算法
+```
+
+压缩时使用 `V` 投影：`projected = (data - mu) @ V`，将 `[n_pos, 8192]` 压缩到 `[n_pos, r]`。
+解压时使用 `V^T` 反投影：`reconstructed = projected @ V^T + mu`，恢复到 `[n_pos, 8192]`。
+
+`S`（奇异值）的平方 `S²` 正比于每个主成分解释的方差，直接输入 DP 比特分配算法，方差大的成分获得更多量化比特。
+
 ### 2.6 DP 比特分配 (Dynamic Programming Bit Allocation)
 
 这是 kvtc 的关键创新之一。DP 算法决定每组 PCA 分量应分配多少比特来量化，目标是在固定比特预算下**最小化 Frobenius 重建误差**。
